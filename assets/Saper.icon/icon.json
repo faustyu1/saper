@@ -1,0 +1,38 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.75000,0.75000,0.73000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "fill": {
+            "solid": "extended-srgb:0.85000,0.12000,0.12000,1.00000"
+          },
+          "image-name": "banner.png",
+          "name": "Banner"
+        },
+        {
+          "fill": {
+            "solid": "extended-srgb:0.49000,0.49000,0.52000,1.00000"
+          },
+          "image-name": "pole.png",
+          "name": "Pole"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}
