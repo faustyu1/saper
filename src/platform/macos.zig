@@ -96,7 +96,11 @@ pub const Window = struct {
     layer: id,
     color_space: ?*anyopaque,
     run_loop_mode: id,
+    /// The zoom asked for on the command line, in points per pixel.
     scale: i32,
+    /// The zoom actually used: `scale`, shrunk when the window would not fit.
+    px: f64,
+    style: u64,
     width: i32,
     height: i32,
     /// Point offsets of the pixel content inside the window's content area.
@@ -124,18 +128,22 @@ pub const Window = struct {
         const inset_top: i32 = if (use_glass) glass_top_margin else 0;
         const inset_bottom: i32 = if (use_glass) glass_bottom_margin else 0;
 
-        const content_w = options.width * options.scale + inset_x * 2;
-        const content_h = options.height * options.scale + inset_top + inset_bottom;
+        var style = style_titled | style_closable | style_miniaturizable;
+        if (use_glass) style |= style_full_size_content;
+
+        const screen = msg(id, cls("NSScreen"), sel("mainScreen"), .{});
+        const px = fitScale(screen, options.scale, style, options.width, options.height, inset_x * 2, inset_top + inset_bottom);
+        const pixel_size = NSSize{
+            .width = @as(f64, @floatFromInt(options.width)) * px,
+            .height = @as(f64, @floatFromInt(options.height)) * px,
+        };
         const content_rect = NSRect{
             .origin = .{ .x = 0, .y = 0 },
             .size = .{
-                .width = @floatFromInt(content_w),
-                .height = @floatFromInt(content_h),
+                .width = pixel_size.width + @as(f64, @floatFromInt(inset_x * 2)),
+                .height = pixel_size.height + @as(f64, @floatFromInt(inset_top + inset_bottom)),
             },
         };
-
-        var style = style_titled | style_closable | style_miniaturizable;
-        if (use_glass) style |= style_full_size_content;
 
         const window_alloc = msg(id, cls("NSWindow"), sel("alloc"), .{});
         const window = msg(
@@ -155,10 +163,7 @@ pub const Window = struct {
                 .x = @floatFromInt(inset_x),
                 .y = @floatFromInt(inset_bottom),
             },
-            .size = .{
-                .width = @floatFromInt(options.width * options.scale),
-                .height = @floatFromInt(options.height * options.scale),
-            },
+            .size = pixel_size,
         };
         const view = msg(
             id,
@@ -208,7 +213,7 @@ pub const Window = struct {
         const run_loop_mode = objc.nsString("kCFRunLoopDefaultMode");
         _ = msg(id, run_loop_mode, sel("retain"), .{});
 
-        msg(void, window, sel("center"), .{});
+        centerOnScreen(window);
         msg(void, window, sel("makeKeyAndOrderFront:"), .{@as(id, null)});
         msg(void, app, sel("activateIgnoringOtherApps:"), .{YES});
         msg(void, app, sel("finishLaunching"), .{});
@@ -221,6 +226,8 @@ pub const Window = struct {
             .color_space = CGColorSpaceCreateDeviceRGB(),
             .run_loop_mode = run_loop_mode,
             .scale = options.scale,
+            .px = px,
+            .style = style,
             .width = options.width,
             .height = options.height,
             .inset_x = inset_x,
@@ -230,6 +237,42 @@ pub const Window = struct {
             .queue = .empty,
             .allocator = allocator,
         };
+    }
+
+    /// Points per framebuffer pixel: the requested zoom, stepped down one device
+    /// pixel at a time until the window fits the screen's usable area (minus
+    /// menu bar and Dock). Whole device pixels keep the art crisp: 1.5 points
+    /// is exactly 3 pixels on a Retina display.
+    fn fitScale(screen: id, requested: i32, style: u64, width: i32, height: i32, extra_w: i32, extra_h: i32) f64 {
+        if (screen == null) return @floatFromInt(requested);
+        const visible = msg(NSRect, screen, sel("visibleFrame"), .{});
+        const backing = @max(msg(f64, screen, sel("backingScaleFactor"), .{}), 1.0);
+        const chrome = msg(NSRect, cls("NSWindow"), sel("frameRectForContentRect:styleMask:"), .{ NSRect{}, style });
+        const room_w = visible.size.width - chrome.size.width - @as(f64, @floatFromInt(extra_w));
+        const room_h = visible.size.height - chrome.size.height - @as(f64, @floatFromInt(extra_h));
+        const w: f64 = @floatFromInt(width);
+        const h: f64 = @floatFromInt(height);
+
+        var steps: i32 = @intFromFloat(@as(f64, @floatFromInt(requested)) * backing);
+        while (steps > 1) : (steps -= 1) {
+            const points = @as(f64, @floatFromInt(steps)) / backing;
+            if (w * points <= room_w and h * points <= room_h) return points;
+        }
+        return 1.0 / backing;
+    }
+
+    /// Like -[NSWindow center], but measured against the usable area so the
+    /// bottom edge never slides under the Dock.
+    fn centerOnScreen(window: id) void {
+        const screen = msg(id, window, sel("screen"), .{}) orelse
+            msg(id, cls("NSScreen"), sel("mainScreen"), .{}) orelse return;
+        const visible = msg(NSRect, screen, sel("visibleFrame"), .{});
+        const frame = msg(NSRect, window, sel("frame"), .{});
+        const origin = NSPoint{
+            .x = visible.origin.x + @floor((visible.size.width - frame.size.width) / 2),
+            .y = visible.origin.y + @max(@floor((visible.size.height - frame.size.height) / 2), 0),
+        };
+        msg(void, window, sel("setFrameOrigin:"), .{origin});
     }
 
     fn responds(object: id, comptime name: [:0]const u8) bool {
@@ -262,16 +305,22 @@ pub const Window = struct {
     }
 
     /// Resize the content area, keeping the window centred like the original
-    /// Minesweeper does when the difficulty changes.
-    /// Resize the content area, keeping the window centred like the original
-    /// Minesweeper does when the difficulty changes.
+    /// Minesweeper does when the difficulty changes. Big custom fields zoom
+    /// out instead of running off the screen.
     pub fn setSize(self: *Window, width: i32, height: i32) void {
         if (width == self.width and height == self.height) return;
         self.width = width;
         self.height = height;
+        const screen = msg(id, self.window, sel("screen"), .{}) orelse
+            msg(id, cls("NSScreen"), sel("mainScreen"), .{});
+        self.px = fitScale(screen, self.scale, self.style, width, height, self.inset_x * 2, self.inset_top + self.inset_bottom);
+        const pixel_size = NSSize{
+            .width = @as(f64, @floatFromInt(width)) * self.px,
+            .height = @as(f64, @floatFromInt(height)) * self.px,
+        };
         const size = NSSize{
-            .width = @floatFromInt(width * self.scale + self.inset_x * 2),
-            .height = @floatFromInt(height * self.scale + self.inset_top + self.inset_bottom),
+            .width = pixel_size.width + @as(f64, @floatFromInt(self.inset_x * 2)),
+            .height = pixel_size.height + @as(f64, @floatFromInt(self.inset_top + self.inset_bottom)),
         };
         msg(void, self.window, sel("setContentSize:"), .{size});
         msg(void, self.view, sel("setFrame:"), .{NSRect{
@@ -279,12 +328,9 @@ pub const Window = struct {
                 .x = @floatFromInt(self.inset_x),
                 .y = @floatFromInt(self.inset_bottom),
             },
-            .size = .{
-                .width = @floatFromInt(width * self.scale),
-                .height = @floatFromInt(height * self.scale),
-            },
+            .size = pixel_size,
         }});
-        msg(void, self.window, sel("center"), .{});
+        centerOnScreen(self.window);
     }
 
     fn push(self: *Window, event: types.Event) void {
@@ -293,8 +339,8 @@ pub const Window = struct {
 
     fn locate(self: *Window, event: id) struct { x: i32, y: i32 } {
         const point = msg(NSPoint, event, sel("locationInWindow"), .{});
-        const scale: f64 = @floatFromInt(self.scale);
-        const content_h: f64 = @floatFromInt(self.height * self.scale + self.inset_top + self.inset_bottom);
+        const scale = self.px;
+        const content_h = @as(f64, @floatFromInt(self.height)) * scale + @as(f64, @floatFromInt(self.inset_top + self.inset_bottom));
         const flipped = content_h - point.y;
         return .{
             .x = @intFromFloat(@floor((point.x - @as(f64, @floatFromInt(self.inset_x))) / scale)),

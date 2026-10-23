@@ -4,4 +4,5 @@ test {
     _ = @import("game.zig");
     _ = @import("app.zig");
     _ = @import("png.zig");
+    _ = @import("widgets.zig");
 }
