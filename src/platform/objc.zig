@@ -2,6 +2,8 @@
 //! We talk to AppKit directly through objc_msgSend so the game has no
 //! third-party dependencies at all.
 
+const builtin = @import("builtin");
+
 pub const id = ?*anyopaque;
 pub const SEL = ?*anyopaque;
 pub const Class = ?*anyopaque;
@@ -9,6 +11,9 @@ pub const Class = ?*anyopaque;
 pub extern fn objc_getClass(name: [*:0]const u8) Class;
 pub extern fn sel_registerName(name: [*:0]const u8) SEL;
 extern fn objc_msgSend() void;
+/// Intel only: methods returning a struct too big for registers (NSRect) go
+/// through this entry point, which takes the result pointer first.
+extern fn objc_msgSend_stret() void;
 
 pub const CGFloat = f64;
 
@@ -37,7 +42,8 @@ pub inline fn msg(comptime Ret: type, obj: id, s: SEL, args: anytype) Ret {
         4 => *const fn (id, SEL, fields[0].type, fields[1].type, fields[2].type, fields[3].type) callconv(.c) Ret,
         else => @compileError("too many arguments"),
     };
-    const f: F = @ptrCast(&objc_msgSend);
+    const stret = builtin.cpu.arch == .x86_64 and @sizeOf(Ret) > 16;
+    const f: F = if (stret) @ptrCast(&objc_msgSend_stret) else @ptrCast(&objc_msgSend);
     return @call(.auto, f, .{ obj, s } ++ args);
 }
 

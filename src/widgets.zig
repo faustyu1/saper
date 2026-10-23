@@ -80,20 +80,28 @@ fn segmentsFor(ch: u8) Segments {
     };
 }
 
+fn segmentColor(lit: bool) gfx.Color {
+    return if (lit) led_on else led_off;
+}
+
+/// One seven-segment digit, 11×21 pixels. Each segment is a three-pixel bar
+/// with bevelled ends, so neighbouring segments meet on a diagonal and never
+/// overlap; the two spare columns of the 13-pixel slot keep digits apart.
 fn ledDigit(fb: *gfx.Framebuffer, x: i32, y: i32, ch: u8) void {
     const s = segmentsFor(ch);
-    const rects = [_]gfx.Rect{
-        .{ .x = x + 2, .y = y + 0, .w = 9, .h = 3 }, // a
-        .{ .x = x + 10, .y = y + 2, .w = 3, .h = 9 }, // b
-        .{ .x = x + 10, .y = y + 12, .w = 3, .h = 9 }, // c
-        .{ .x = x + 2, .y = y + 20, .w = 9, .h = 3 }, // d
-        .{ .x = x + 0, .y = y + 12, .w = 3, .h = 9 }, // e
-        .{ .x = x + 0, .y = y + 2, .w = 3, .h = 9 }, // f
-        .{ .x = x + 2, .y = y + 10, .w = 9, .h = 3 }, // g
-    };
     const on = [_]bool{ s.a, s.b, s.c, s.d, s.e, s.f, s.g };
-    for (rects, on) |rect, lit| {
-        fb.fill(rect, if (lit) led_on else led_off);
+    var k: i32 = 0;
+    while (k < 3) : (k += 1) {
+        // Horizontal bars: a (top), d (bottom), g (middle, tapering both ways).
+        fb.fill(.{ .x = x + 1 + k, .y = y + k, .w = 9 - k * 2, .h = 1 }, segmentColor(on[0]));
+        fb.fill(.{ .x = x + 1 + k, .y = y + 20 - k, .w = 9 - k * 2, .h = 1 }, segmentColor(on[3]));
+        const gw: i32 = if (k == 1) 9 else 7;
+        fb.fill(.{ .x = x + 1 + @divTrunc(9 - gw, 2), .y = y + 9 + k, .w = gw, .h = 1 }, segmentColor(on[6]));
+        // Vertical bars: f, e on the left, b, c on the right.
+        fb.fill(.{ .x = x + k, .y = y + 1 + k, .w = 1, .h = 9 - k * 2 }, segmentColor(on[5]));
+        fb.fill(.{ .x = x + k, .y = y + 11 + k, .w = 1, .h = 9 - k * 2 }, segmentColor(on[4]));
+        fb.fill(.{ .x = x + 10 - k, .y = y + 1 + k, .w = 1, .h = 9 - k * 2 }, segmentColor(on[1]));
+        fb.fill(.{ .x = x + 10 - k, .y = y + 11 + k, .w = 1, .h = 9 - k * 2 }, segmentColor(on[2]));
     }
 }
 
@@ -102,14 +110,16 @@ pub fn ledCounter(fb: *gfx.Framebuffer, r: gfx.Rect, value: i32) void {
     fb.fill(r, led_bg);
     var buf: [8]u8 = undefined;
     const clamped = std.math.clamp(value, -99, 999);
+    // Formatted as unsigned: a padded signed integer gets a leading '+'.
+    const magnitude: u32 = @abs(clamped);
     const digits = if (clamped < 0)
-        std.fmt.bufPrint(&buf, "-{d:0>2}", .{-clamped}) catch "000"
+        std.fmt.bufPrint(&buf, "-{d:0>2}", .{magnitude}) catch "000"
     else
-        std.fmt.bufPrint(&buf, "{d:0>3}", .{clamped}) catch "000";
+        std.fmt.bufPrint(&buf, "{d:0>3}", .{magnitude}) catch "000";
 
     var i: i32 = 0;
     while (i < 3) : (i += 1) {
-        ledDigit(fb, r.x + 1 + i * layout.led_w, r.y + 1, digits[@intCast(i)]);
+        ledDigit(fb, r.x + 2 + i * layout.led_w, r.y + 2, digits[@intCast(i)]);
     }
 }
 
@@ -158,4 +168,36 @@ pub fn titleBar(fb: *gfx.Framebuffer, r: gfx.Rect, title: []const u8) gfx.Rect {
         fb.set(close.x + 8 - i, close.y + 3 + i, dark);
     }
     return close;
+}
+
+fn litAt(fb: *const gfx.Framebuffer, x: i32, y: i32) bool {
+    return fb.pixels[@intCast(y * fb.width + x)] == led_on;
+}
+
+test "led counter shows every digit of three-digit values" {
+    var fb = try gfx.Framebuffer.init(std.testing.allocator, layout.counter_w, layout.counter_h);
+    defer fb.deinit();
+    const r = gfx.Rect{ .x = 0, .y = 0, .w = layout.counter_w, .h = layout.counter_h };
+
+    // 100: the leading "1" lights segment b of the first slot, and the
+    // second slot is a "0", so its segment f is lit too.
+    ledCounter(&fb, r, 100);
+    try std.testing.expect(litAt(&fb, 2 + 10, 2 + 5));
+    try std.testing.expect(litAt(&fb, 2 + layout.led_w, 2 + 5));
+
+    // -5: minus in the first slot, a lit "0" in the second.
+    ledCounter(&fb, r, -5);
+    try std.testing.expect(litAt(&fb, 2 + 5, 2 + 10));
+    try std.testing.expect(litAt(&fb, 2 + layout.led_w, 2 + 5));
+}
+
+test "led digits keep a gap between slots" {
+    var fb = try gfx.Framebuffer.init(std.testing.allocator, layout.counter_w, layout.counter_h);
+    defer fb.deinit();
+    ledCounter(&fb, .{ .x = 0, .y = 0, .w = layout.counter_w, .h = layout.counter_h }, 888);
+    var y: i32 = 0;
+    while (y < layout.counter_h) : (y += 1) {
+        try std.testing.expectEqual(led_bg, fb.pixels[@intCast(y * fb.width + 2 + 11)]);
+        try std.testing.expectEqual(led_bg, fb.pixels[@intCast(y * fb.width + 2 + 12)]);
+    }
 }
