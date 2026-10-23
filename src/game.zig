@@ -186,9 +186,12 @@ pub const Board = struct {
     }
 
     /// Iterative flood fill so a huge Expert board can never blow the stack.
+    /// Cells are revealed as they are pushed, so each one enters the stack at
+    /// most once and it can never hold more than the board's cell count.
     fn floodReveal(self: *Board, start_x: i32, start_y: i32) void {
         var stack: [max_width * max_height]u16 = undefined;
         var top: usize = 0;
+        if (!self.openCell(start_x, start_y)) return;
         stack[top] = @intCast(start_y * self.width + start_x);
         top += 1;
 
@@ -197,11 +200,7 @@ pub const Board = struct {
             const index = stack[top];
             const x = @mod(@as(i32, index), self.width);
             const y = @divFloor(@as(i32, index), self.width);
-            const cell = self.at(x, y);
-            if (cell.revealed or cell.mark == .flag or cell.mine) continue;
-            cell.revealed = true;
-            self.revealed_count += 1;
-            if (cell.adjacent != 0) continue;
+            if (self.get(x, y).adjacent != 0) continue;
 
             var dy: i32 = -1;
             while (dy <= 1) : (dy += 1) {
@@ -211,13 +210,21 @@ pub const Board = struct {
                     const nx = x + dx;
                     const ny = y + dy;
                     if (!self.inBounds(nx, ny)) continue;
-                    const neighbor = self.get(nx, ny);
-                    if (neighbor.revealed or neighbor.mark == .flag or neighbor.mine) continue;
+                    if (!self.openCell(nx, ny)) continue;
                     stack[top] = @intCast(ny * self.width + nx);
                     top += 1;
                 }
             }
         }
+    }
+
+    /// Reveal one safe, unmarked cell; false if it was not eligible.
+    fn openCell(self: *Board, x: i32, y: i32) bool {
+        const cell = self.at(x, y);
+        if (cell.revealed or cell.mark == .flag or cell.mine) return false;
+        cell.revealed = true;
+        self.revealed_count += 1;
+        return true;
     }
 
     /// Clicking both buttons on a satisfied number opens its unflagged neighbours.
@@ -398,6 +405,13 @@ test "flood fill opens a whole empty region" {
     board.reveal(4, 4, 0);
     // With a single mine, one click on an empty cell opens nearly everything.
     try testing.expect(board.revealed_count > 50);
+}
+
+test "flood fill on the largest empty board does not overflow" {
+    var board = Board.init(.{ .width = max_width, .height = max_height, .mines = 1 }, 1);
+    board.reveal(max_width / 2, max_height / 2, 0);
+    try testing.expect(board.state == .won or board.state == .playing);
+    try testing.expect(board.revealed_count > 600);
 }
 
 test "chording opens neighbours only when the flags match" {
